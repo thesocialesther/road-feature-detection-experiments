@@ -1,0 +1,356 @@
+RASPBERRY PI AND ESP32: HOW THIS PROJECT WORKS
+
+1. WHAT THE SYSTEM DOES
+
+The Raspberry Pi looks at pictures from a USB camera and checks for five types
+of road features. It sends the detected class signals through a USB cable to
+the ESP32. The ESP32 receives those signals and provides a place for your
+machine-control functions to run.
+
+The complete path is:
+
+USB camera -> Raspberry Pi -> YOLO model -> class signals -> USB cable
+           -> ESP32 -> your control functions -> actuator drivers -> machine
+
+The vision and communication parts are implemented. The actual decisions about
+motors, steering, braking, and other hardware is for Cornelius to implement.
+Currently, receiving a pothole signal does not automatically apply a brake.
+
+
+2. WHAT EACH DEVICE DOES
+
+The Raspberry Pi:
+  - Reads the USB camera.
+  - Resizes and prepares each picture for the model.
+  - Runs the trained yolo11n.onnx model on its CPU.
+  - Reads predicted classes, confidence scores, and boxes around objects.
+  - Filters weak predictions and overlapping duplicate boxes.
+  - Checks that a class is confirmed and the result is recent enough.
+  - Sends the current class signals to the ESP32.
+  - Checks that the ESP32 replies.
+  - Can show the annotated picture or optionally record a video.
+
+The ESP32:
+  - Does not run the vision model or receive camera pictures.
+  - Receives small text messages from the Pi.
+  - Checks that each message is complete, valid, and from the current connection.
+  - Extracts the class signals and passes them to handleClassSignals().
+  - Replies to confirm that the message was accepted.
+  - Clears requests if the messages expire.
+  - Will operate the actual hardware once your control functions are connected.
+
+No Wi-Fi, Bluetooth, MQTT broker, or internet service is used for this link.
+
+
+3. THE IMPORTANT FILES
+
+main.py
+  The complete camera-to-ESP application. This is the normal entry point.
+  It runs without a screen unless --show-window is supplied.
+
+yolo11n.onnx
+  The current trained model used by the application. It recognises the five
+  road classes listed below. Its input is one 640 x 640 RGB image, normalised
+  to values between 0 and 1. The program handles that preparation.
+
+esp/road_actuation/road_actuation.ino
+  The firmware to upload to the ESP32 using Arduino IDE.
+  This contains the communication code and your integration function.
+
+HEADLESS.md
+  Detailed installation, protocol, and bench-test instructions.
+
+4. WHICH SIGNAL MEANS WHICH CLASS
+
+The Pi sends one number called a mask. Think of it as five on/off switches
+packed into one number. Each class has a different value:
+
+  Class                    Bit position    Value
+  cracks                   0               1
+  speed_bumps              1               2
+  potholes                 2               4
+  left_road_boundaries      3               8
+  right_road_boundaries     4               16
+
+To describe several classes together, their values are added:
+
+  0  = no active class requests
+  1  = cracks
+  4  = potholes
+  5  = cracks AND potholes (1 + 4)
+  24 = left AND right road boundaries (8 + 16)
+  31 = all five classes (1 + 2 + 4 + 8 + 16)
+
+This number is NOT a speed, distance, angle, severity level, or object count.
+Two potholes still produce the pothole bit, not a count of two.
+
+The mask uses this fixed order even if a compatible model stores its class IDs
+in a different order. The Pi maps model class names to the correct signal bits.
+
+Only the class mask is sent. Bounding boxes and confidence values stay on the
+Pi. If machine control needs object location, distance, or left/right position
+within the picture, the communication protocol must be extended first.
+
+
+5. HOW THE USB COMMUNICATION WORKS
+
+Connections:
+  Plug the USB camera into the Pi.
+  Connect the ESP32 to another Pi USB port with a USB DATA cable.
+  A charge-only cable cannot carry these messages.
+
+Port selection:
+  The ESP usually appears as /dev/ttyUSB0 or /dev/ttyACM0.
+  main.py selects a single connected USB serial device automatically.
+  If more than one exists, use --serial-port with the actual ESP device.
+  Automatic selection does not prove a device is an ESP: the handshake does.
+
+Serial settings:
+  115200 baud, 8 data bits, no parity, 1 stop bit, no flow control.
+  Both the Python code and firmware already use these settings.
+
+Starting the connection:
+  1. The Pi opens the serial port and waits about two seconds because opening
+     the port can reset some ESP32 boards.
+  2. The Pi sends HELLO with a new connection identifier.
+  3. The ESP clears its class requests and replies READY with the same identifier.
+  4. The Pi sends a zero state and waits for confirmation.
+  5. Camera processing and regular class-state messages begin.
+
+During operation:
+  A separate Python thread handles serial communication so the camera loop does
+  not wait directly for every reply. It sends the latest state, waits for its
+  acknowledgement, then waits about 100 ms before sending again.
+
+  This is at most roughly ten updates per second and can be slower because of
+  reply time and system load. It does not mean the model processes ten pictures
+  per second. The same recent detection state may be sent several times.
+
+  The thread keeps only the latest state, not a queue of old detections.
+  Repeating a state does not give its source image a new lifetime: the remaining
+  time decreases until the next fresh image result arrives.
+
+
+6. THE ACTUAL MESSAGE FORMAT
+
+Every message is a line of plain text. Its structure is:
+
+  message-body*checksum followed by a newline
+
+The checksum is four hexadecimal characters. It helps detect damaged messages.
+It is called CRC-16/CCITT-FALSE: polynomial 0x1021, initial value 0xFFFF,
+no reflection, no final XOR. It covers only the message-body bytes.
+It is an error check, not encryption or authentication.
+
+The following examples show only the message bodies. The real code adds the
+checksum and newline automatically; do not send these bare examples as packets.
+
+  Pi sends:    HELLO,0123456789abcdef
+  ESP replies: READY,0123456789abcdef
+
+  Pi sends:    STATE,0123456789abcdef,7,5,900
+  ESP replies: ACK,0123456789abcdef,7,5
+
+Meaning of the STATE example:
+  STATE             = this message contains the current class signals
+  0123456789abcdef  = identifier for this connection
+  7                 = message sequence number
+  5                 = cracks and potholes are active
+  900               = requests expire after 900 ms from ESP acceptance
+
+The connection identifier is 16 lowercase hexadecimal characters. Each state
+message has a higher sequence number than the previous one. The ESP rejects
+wrong identifiers, repeated/older sequence numbers, bad checksums, invalid masks,
+and lifetimes outside 100 to 5000 ms. Invalid packets do not refresh expiry.
+
+ACK means the ESP accepted the state and the callback returned. It does NOT
+mean a motor moved, a brake engaged, or an actuator reached its target. Physical
+completion feedback would need additional sensors and response messages.
+
+
+7. HOW TO ADD THE MACHINE CONTROL
+
+Open esp/road_actuation/road_actuation.ino and find:
+
+  void handleClassSignals(uint8_t mask)
+
+This is the integration point. The serial parser already calls it with a valid
+mask. Your partner does not need to rewrite the parser to receive class signals.
+
+Inside that function, each class can be read as a true/false value:
+
+  bool cracksDetected        = (mask & 1) != 0;
+  bool speedBumpDetected     = (mask & 2) != 0;
+  bool potholeDetected       = (mask & 4) != 0;
+  bool leftBoundaryDetected  = (mask & 8) != 0;
+  bool rightBoundaryDetected = (mask & 16) != 0;
+
+The '&' checks whether that particular class switch is on.
+Pass those values to your own control functions or store them for the main
+ESP loop to use. Decide how simultaneous classes affect each other; the current
+communication code does not assign priority to any class.
+
+IMPORTANT ABOUT THE CURRENT CALLBACK:
+  OUTPUTS_ENABLED is false, and every CLASS_PINS entry is -1.
+  Communication and acknowledgements still work, but no GPIO outputs are driven.
+
+  The existing line "if (!OUTPUTS_ENABLED) return;" exits the callback early.
+  If you add your own control logic after this line, it will not run while the
+  flag is false. Put your integration before that return, or deliberately replace
+  the optional GPIO example with your own implementation.
+
+Optional simple digital-output approach:
+  If one on/off GPIO per class suits the hardware, assign the five CLASS_PINS,
+  set ACTIVE_HIGH appropriately for each driver, then set OUTPUTS_ENABLED true
+  and upload the firmware again. HIGH/LOW outputs alone do not provide a full
+  speed or steering controller. Use suitable actuator drivers, not GPIO pins
+  directly connected to motors.
+
+Repeated messages:
+  The callback runs for every accepted state, even if the mask has not changed.
+  A persistent pothole signal should not unintentionally restart a one-shot
+  action ten times per second. If an action should happen only when a class first
+  appears, compare the current mask with a stored previous mask.
+
+Keep the callback quick:
+  Do not use long delay() calls or wait in a loop for a motor movement to finish.
+  Store the requested action and let the regular ESP loop advance it using
+  timers or a state machine. Otherwise serial processing and the expiry check
+  cannot run promptly.
+
+Define what zero means:
+  mask == 0 clears all class requests. It can mean no detected classes, stale
+  vision, startup, shutdown, or communication expiry. It does NOT prove that
+  the road is clear. The current callback interface does not distinguish these
+  causes. If your controller needs that distinction, extend the interface.
+
+  You must define the appropriate hardware response to cleared
+  requests. The name safeStop() currently means "clear the class requests";
+  it cannot physically stop a machine until the actuator logic implements that.
+
+
+8. WHAT HAPPENS IF SOMETHING FAILS
+
+Camera read fails:
+  The Pi publishes zero, attempts to clear ESP requests, and stops the application.
+
+Vision becomes slow or gets stuck:
+  The serial thread will stop refreshing the old class state once its original
+  lifetime expires. The ESP also has its own local expiry timer.
+
+USB cable disconnects or Python crashes:
+  The ESP clears requests when the last accepted state's lifetime runs out,
+  provided the firmware loop is still running. The USB connection may also be
+  supplying the ESP's power; unplugging it can power the ESP off instead. Actual
+  driver behaviour on loss of power must be considered in the hardware design.
+
+Serial write or acknowledgement fails:
+  Writes and ACK waits each have a one-second limit. The Pi stops the runner
+  and attempts a final zero state. It does not automatically reconnect or replay
+  failed active commands. Restarting establishes a new connection identifier.
+
+Q, Esc, Ctrl+C, or normal shutdown:
+  Q/Esc work when the preview is enabled; Ctrl+C works in the terminal. The Pi
+  attempts to clear requests before releasing the camera and video resources.
+  These actions may wait for a currently running inference to finish. The ESP's
+  local expiry still limits how long a previous request is held.
+
+The expiry timer is a software check in loop(), not an independent hardware
+emergency-stop system. Blocking or broken actuator code can stop it from running.
+
+
+9. HOW TO START IT
+
+First upload esp/road_actuation/road_actuation.ino using Arduino IDE, selecting
+the actual ESP32 board and USB port. On boards with native USB and a separate
+USB-UART connector, Serial must be configured for the connector you actually use.
+See HEADLESS.md for the USB CDC setup notes.
+
+Close Arduino Serial Monitor before starting the Pi program, because Python
+needs the same serial port. Activate the prepared Python camera environment,
+then enter the project folder:
+
+  cd ~/bumblebee
+
+Normal headless operation (no display):
+
+  python main.py
+
+Preview for a communication-only bench test with a longer allowed lifetime:
+
+  python main.py --show-window --ttl-ms 5000 --confirm-frames 1
+
+Choose a specific ESP and camera:
+
+  python main.py --serial-port /dev/ttyUSB0 --usb-index 0
+
+Use the real ESP port; /dev/ttyUSB0 is just an example. A stable
+/dev/serial/by-id/... path can also be supplied.
+
+Other useful options:
+  --conf 0.3              Minimum model confidence; current default is 0.3.
+  --inference-threads 2   CPU threads for inference; current default is 2.
+  --output recording.avi Save annotated video; no recording by default.
+  --model other.onnx     Use a different compatible five-class road model.
+
+Command-line changes apply only to that run. Running plain "python main.py"
+again returns to the defaults, including 1500 ms lifetime and two-frame
+confirmation. --show-window needs a desktop session and GUI-enabled OpenCV.
+The headless OpenCV package cannot create a preview window.
+
+
+10. HOW TO TEST AND READ THE RESULTS
+
+Test vision alone, with every class eligible regardless of confidence:
+
+  python test_onnx.py --show-window --conf 0.0 --frames 0
+
+This runs continuously until stopped. It does not connect to the ESP or send
+actuation requests. It draws the top 20 candidates by score, without NMS, and
+saves latest.jpg and scores.jsonl in a timestamped folder under onnx_tests/.
+Zero confidence includes unreliable predictions; boxes alone do not establish
+that a detection is correct. The explicit --conf 0.0 overrides the test script's
+current 0.2 default.
+
+Test a known road image without a screen:
+
+  python test_onnx.py --source road.jpg --conf 0.0
+
+Test communication alone:
+  HEADLESS.md includes a "Communication-only bench check" that sends each class
+  separately, then all classes, then zero. Use this to verify your callback
+  without relying on the camera to detect anything. It sends actual requests,
+  so use the communication-only firmware or a suitable bench arrangement.
+
+Useful log messages:
+  "ESP connected"       = handshake and initial zero-state ACK succeeded.
+  "detected=..."        = class predictions remaining after confidence filtering
+                          and postprocessing, before freshness/confirmation.
+  "state=expired"       = that frame is too old to drive class signals.
+  "mask=0"              = no active requests, for any of the reasons above.
+  "Class outputs: ..."  = the Pi's requested class state changed; this is not
+                          proof of physical actuator movement.
+  "Write timeout"       = host USB write stalled, not a missing vision detection.
+  "did not acknowledge" = expected matching ESP reply was not received in time.
+
+If there are no detections, test a clear known-positive road image first.
+Check raw scores with test_onnx.py before changing the ESP code. If communication
+fails even in the bench test, investigate the USB link and firmware separately.
+
+
+11. CURRENT HANDOFF STATUS
+
+Implemented:
+  USB camera acquisition, YOLO11 ONNX inference, five-class signalling, optional
+  preview/recording, serial handshake, packet checksums, acknowledgements,
+  sequence checking, and request expiry.
+
+Still the partner's responsibility:
+  Actuator wiring, GPIO choices, motor/steering/braking functions, priority when
+  multiple classes appear, response to cleared requests, and physical feedback
+  if acknowledgement of actual movement is needed.
+
+The YOLO11 export passed graph validation and numerical comparison with the
+original checkpoint. Software tests also cover the protocol and several failure
+paths. These checks do not certify detection accuracy or physical machine
+behaviour. Confirm those using appropriate road images and the actual hardware.
