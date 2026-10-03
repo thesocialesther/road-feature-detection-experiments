@@ -1,0 +1,4 @@
+# Matches the version recorded in the uploaded trained checkpoint.
+ultralytics==8.4.131
+onnx
+onnxruntime

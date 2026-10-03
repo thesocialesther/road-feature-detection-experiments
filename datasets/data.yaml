@@ -1,0 +1,11 @@
+path: split_dataset2
+train: train/images
+val: val/images
+test: test/images
+nc: 5
+names:
+  0: cracks
+  1: speed_bumps
+  2: potholes
+  3: left_road_boundaries
+  4: right_road_boundaries
