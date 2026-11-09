@@ -2,6 +2,8 @@
 
 **Author: Oluwaferanmi Esther Onifade**
 
+**Final selected architecture (author-confirmed): YOLO26n.** The previously published YOLO11-based inference/Bumblebee materials are historical comparison/prototype components, not a validated release of the final YOLO26n deployment. See [FINAL_MODEL_VERIFICATION.md](FINAL_MODEL_VERIFICATION.md) for recovered checkpoint SHA-256 fingerprints, 100-epoch training logs, metrics, and outstanding reproduction checks.
+
 Computer-vision experiments for detecting five road features: cracks, speed bumps, potholes, left road boundaries, and right road boundaries. The repository preserves training and video-inference work plus an experimental ONNX/ESP actuation prototype.
 
 ## Components
@@ -38,6 +40,6 @@ Choose confidence thresholds using validation results. See [INFERENCE_README.md]
 
 ## Project status and missing artifacts
 
-This is an experimental source snapshot. The video-inference code is YOLO11-based; notebook experiments also include later YOLO26 work. The final YOLO26 Raspberry Pi deployment has not yet been identified and is not represented as complete here.
+This is an experimental source snapshot. The video-inference code is YOLO11-based; notebook experiments also include later YOLO26 work. The author reports a complete physical Raspberry Pi/ESP32 prototype, but its actual deployed checkpoint identity, hardware measurements, and final YOLO26n source have not yet been independently verified from this repository. The historical YOLO11 code is not evidence of a YOLO26n deployed model.
 
 To complete the final-project release, add the confirmed deployment source, matching trained `.pt`/`.onnx` models, final dataset/splits, class configuration, evaluation reports, and sample footage or outputs. Notebook outputs were cleared for export. Physical autonomous-driving performance has not been established by this snapshot.
